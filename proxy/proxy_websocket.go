@@ -1,93 +1,25 @@
 package proxy
 
 import (
-	"crypto/tls"
 	"fmt"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
-	"strings"
 	"sync"
-	"time"
 
 	"github.com/gorilla/websocket"
 )
-
-var (
-	dialer = &websocket.Dialer{
-		Proxy:            http.ProxyFromEnvironment,
-		HandshakeTimeout: 45 * time.Second,
-		// EnableCompression: true,
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		Jar:             cookieJar(),
-	}
-	// 添加 WebSocket upgrader
-	wsUpgrader = websocket.Upgrader{
-		// EnableCompression: true,
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
-	}
-)
-
-func cookieJar() http.CookieJar {
-	jar, _ := cookiejar.New(nil)
-	return jar
-}
-
-type WebSocket websocket.Dialer
-
-func (ws *WebSocket) Dialer() *websocket.Dialer {
-	return (*websocket.Dialer)(ws)
-}
-
-func (ws *WebSocket) Clone() *WebSocket {
-	return &WebSocket{
-		Proxy:             ws.Proxy,
-		HandshakeTimeout:  ws.HandshakeTimeout,
-		EnableCompression: ws.EnableCompression,
-		TLSClientConfig:   ws.TLSClientConfig,
-		NetDialContext:    ws.NetDialContext,
-		NetDial:           ws.NetDial,
-		NetDialTLSContext: ws.NetDialTLSContext,
-		ReadBufferSize:    ws.ReadBufferSize,
-		WriteBufferSize:   ws.WriteBufferSize,
-		WriteBufferPool:   ws.WriteBufferPool,
-		Subprotocols:      ws.Subprotocols,
-		Jar:               ws.Jar,
-	}
-}
-
-func WebSocketDialer() *WebSocket {
-	if socks5Func != nil && dialer.NetDialContext == nil {
-		dialer.NetDialContext = socks5Func
-	}
-
-	if socks5Func == nil && dialer.NetDialContext != nil {
-		dialer.NetDialContext = nil
-	}
-
-	if proxyFunc != nil && dialer.Proxy == nil {
-		dialer.Proxy = proxyFunc
-	}
-
-	if proxyFunc == nil && dialer.Proxy != nil {
-		dialer.Proxy = nil
-	}
-	return (*WebSocket)(dialer)
-}
 
 // 新增：处理 WebSocket 连接
 func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// 复制原始请求头
 	header := make(http.Header)
 	for k, v := range r.Header {
-		switch {
-		case k == "Upgrade":
-		case k == "Connection":
-		case k == "Sec-Websocket-Key":
-		case k == "Sec-Websocket-Version":
-		case k == "Sec-Websocket-Extensions":
+		switch k {
+		case "Upgrade":
+		case "Connection":
+		case "Sec-Websocket-Key":
+		case "Sec-Websocket-Version":
+		case "Sec-Websocket-Extensions":
 		default:
 			header[k] = v
 		}
@@ -105,9 +37,10 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		targetURL.Host = r.Host
 	}
 
-	if targetURL.Scheme == "http" {
+	switch targetURL.Scheme {
+	case "http":
 		targetURL.Scheme = "ws"
-	} else if targetURL.Scheme == "https" {
+	case "https":
 		targetURL.Scheme = "wss"
 	}
 
@@ -205,10 +138,4 @@ func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn, msg *Message) error {
 			msg.RespBodyChan <- message
 		}
 	}
-}
-
-// 新增：检查是否为 WebSocket 请求
-func isWebSocketRequest(r *http.Request) bool {
-	return strings.ToLower(r.Header.Get("Connection")) == "upgrade" &&
-		strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
 }

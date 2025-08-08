@@ -1,68 +1,30 @@
 package proxy
 
 import (
-	"bytes"
-	"compress/flate"
-	"compress/gzip"
-	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/base64"
 	"encoding/pem"
-	"fmt"
-	"io"
 	"log/slog"
-	"math/big"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
-
-	"github.com/andybalholm/brotli"
-	tlsutls "github.com/refraction-networking/utls"
-	"golang.org/x/net/proxy"
 )
 
-var cipherSuiteMap = map[uint16]string{
-	0x0005: "TLS_RSA_WITH_RC4_128_SHA",
-	0x000a: "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
-	0x002f: "TLS_RSA_WITH_AES_128_CBC_SHA",
-	0x0035: "TLS_RSA_WITH_AES_256_CBC_SHA",
-	0x003c: "TLS_RSA_WITH_AES_128_CBC_SHA256",
-	0x009c: "TLS_RSA_WITH_AES_128_GCM_SHA256",
-	0x009d: "TLS_RSA_WITH_AES_256_GCM_SHA384",
-	0xc007: "TLS_ECDHE_ECDSA_WITH_RC4_128_SHA",
-	0xc009: "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA",
-	0xc00a: "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA",
-	0xc011: "TLS_ECDHE_RSA_WITH_RC4_128_SHA",
-	0xc012: "TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA",
-	0xc013: "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
-	0xc014: "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
-	0xc023: "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256",
-	0xc027: "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256",
-	0xc02f: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-	0xc02b: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
-	0xc030: "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-	0xc02c: "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
-	0xcca8: "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
-	0xcca9: "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
-	0x1301: "TLS_AES_128_GCM_SHA256",
-	0x1302: "TLS_AES_256_GCM_SHA384",
-	0x1303: "TLS_CHACHA20_POLY1305_SHA256",
-}
-
 var (
-	proxyFunc     func(*http.Request) (*url.URL, error)
-	socks5Func    func(ctx context.Context, network, addr string) (net.Conn, error)
-	socks5TLSFunc func(ctx context.Context, network, addr string) (net.Conn, error)
-	hookFunc      func(*url.URL, []byte) []byte
+	proxyFunc func(*http.Request) (*url.URL, error)
+	hookFunc  func(*url.URL, []byte) []byte
+
+	netDialer Dialer = NewNetDialer(&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	})
 )
 
 type Proxy struct {
@@ -89,154 +51,6 @@ func (p *Proxy) SetMessageChan(messageChan chan *Message) {
 	p.messageChan = messageChan
 }
 
-func (p *Proxy) getCertificate(domain string) (*tls.Certificate, error) {
-	if cert, ok := p.certCache.Load(domain); ok {
-		return cert.(*tls.Certificate), nil
-	}
-
-	atomic.AddInt64(&p.serialNumber, 1)
-
-	serverTemplate := &x509.Certificate{
-		SerialNumber: big.NewInt(p.serialNumber),
-		Subject: pkix.Name{
-			CommonName: domain,
-		},
-		NotBefore: time.Now().AddDate(0, 0, -1),
-		NotAfter:  time.Now().AddDate(1, 0, 0),
-		KeyUsage:  x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{
-			x509.ExtKeyUsageServerAuth,
-		},
-	}
-
-	if ip := net.ParseIP(domain); ip != nil {
-		serverTemplate.IPAddresses = []net.IP{ip}
-	} else {
-		serverTemplate.DNSNames = []string{domain}
-	}
-
-	// ⚠️ 每个证书都应有自己独立的密钥对
-	serverKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, err
-	}
-
-	certBytes, err := x509.CreateCertificate(rand.Reader, serverTemplate, p.rootCert, &serverKey.PublicKey, p.rootKey)
-	if err != nil {
-		return nil, err
-	}
-
-	cert := &tls.Certificate{
-		Certificate: [][]byte{certBytes},
-		PrivateKey:  serverKey,
-	}
-
-	p.certCache.Store(domain, cert)
-
-	return cert, nil
-}
-
-func (p *Proxy) doReplace1(w http.ResponseWriter, r *http.Request) {
-	tr := HttpTransport()
-	response, err := tr.RoundTrip(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-
-	defer func() {
-		_ = response.Body.Close()
-	}()
-
-	w.WriteHeader(response.StatusCode)
-	copyHeader(w.Header(), response.Header)
-	_, _ = io.Copy(w, response.Body)
-}
-func (p *Proxy) doReplace2(w http.ResponseWriter, body []byte) {
-	w.WriteHeader(200)
-	_, _ = w.Write(body)
-}
-
-func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
-	r.Header.Del("Proxy-Connection")
-
-	if r.Method == "CONNECT" {
-		ctx := context.Background()
-		ctx, cancel := context.WithTimeout(ctx, time.Second*30)
-		defer cancel()
-
-		conn, err := new(net.Dialer).DialContext(ctx, "tcp", r.Host)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		defer func() {
-			_ = conn.Close()
-		}()
-
-		_, _ = w.Write([]byte("HTTP/1.1 200 Connection Established\n\n"))
-		// if _, err = fmt.Fprint(w, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
-		// 	http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		// 	return
-		// }
-
-		hijacker, ok := w.(http.Hijacker)
-		if !ok {
-			http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-			return
-		}
-
-		hijack, _, err := hijacker.Hijack()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		}
-		defer func() {
-			_ = hijack.Close()
-		}()
-
-		var g sync.WaitGroup
-		g.Add(2)
-		go func() {
-			defer g.Done()
-			io.Copy(conn, hijack)
-		}()
-		go func() {
-			defer g.Done()
-			io.Copy(hijack, conn)
-		}()
-		g.Wait()
-	} else {
-		reverseProxy := reverseProxyPool.Get().(*httputil.ReverseProxy)
-		defer func() {
-			reverseProxy.Rewrite = nil
-			reverseProxy.ModifyResponse = nil
-			reverseProxyPool.Put(reverseProxy)
-		}()
-
-		reverseProxy.Rewrite = func(req *httputil.ProxyRequest) {
-			// req.Out.Header.Set("HOST", r.Host)
-			// req.Out.Header.Del("Accept-Encoding")
-		}
-
-		reverseProxy.Transport = HttpTransport()
-		reverseProxy.ServeHTTP(w, r)
-
-		// response, err := t.RoundTrip(r)
-		// if err != nil {
-		// 	http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		// 	return
-		// }
-
-		// defer func() {
-		// 	_ = response.Body.Close()
-		// }()
-
-		// w.WriteHeader(response.StatusCode)
-		// copyHeader(w.Header(), response.Header)
-		// _, _ = io.Copy(w, response.Body)
-		return
-	}
-}
 func (p *Proxy) Include() []string {
 	return p.include
 }
@@ -322,6 +136,10 @@ func (p *Proxy) ClearProxy() {
 	proxyFunc = nil
 }
 
+func (p *Proxy) Socks5() string {
+	return p.socks5
+}
+
 func (p *Proxy) SetSocks5(addr string) {
 	if addr == "" {
 		return
@@ -329,46 +147,27 @@ func (p *Proxy) SetSocks5(addr string) {
 
 	p.socks5 = addr
 
-	// u, _ := url.Parse(socks5Proxy)
-	// p.socks5Dialer, _ = proxy.FromURL(u, proxy.Direct)
-	dialer, _ := proxy.SOCKS5("tcp", addr, nil, proxy.Direct)
-	socks5Func = func(_ context.Context, network, addr string) (net.Conn, error) {
-		conn, err := dialer.Dial(network, addr)
-		if err != nil {
-			return nil, err
-		}
-		return conn, nil
-	}
-
-	socks5TLSFunc = func(_ context.Context, network, addr string) (net.Conn, error) {
-		conn, err := dialer.Dial(network, addr)
-		if err != nil {
-			return nil, err
-		}
-
-		hostname, _, _ := net.SplitHostPort(addr)
-
-		config := &tlsutls.Config{
-			ServerName:         hostname,
-			InsecureSkipVerify: true,
-		}
-
-		uTlsConn := tlsutls.UClient(conn, config, tlsutls.HelloCustom)
-		spec, _ := tlsutls.UTLSIdToSpec(tlsutls.HelloRandomizedNoALPN)
-		spec.Extensions = append(spec.Extensions, &tlsutls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}})
-		if err := uTlsConn.ApplyPreset(&spec); err != nil {
-			return nil, fmt.Errorf("ApplyPreset failed: %w", err)
-		}
-		if err := uTlsConn.Handshake(); err != nil {
-			return nil, fmt.Errorf("TLS handshake failed: %w", err)
-		}
-		return uTlsConn, nil
-	}
+	netDialer, _ = NewSocks5Dialer(addr)
 }
 
 func (p *Proxy) ClearSocks5() {
 	p.socks5 = ""
-	socks5Func = nil
+	netDialer = NewNetDialer(&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	})
+}
+
+func (p *Proxy) ClientHello() *UtlsConfig {
+	return clientHelloConfig
+}
+
+func (p *Proxy) SetClientHello(config *UtlsConfig) {
+	clientHelloConfig = config
+}
+
+func (p *Proxy) ClearClientHello() {
+	clientHelloConfig = nil
 }
 
 // hookFunc   func(*url.URL, []byte) []byte
@@ -382,205 +181,6 @@ func (p *Proxy) ClearHook() {
 
 func (p *Proxy) DisableGZIP() {
 	p.disableGZIP = true
-}
-
-func (p *Proxy) Replay(message Message) {
-	r, err := http.NewRequest(message.Method, message.Url, strings.NewReader(message.ReqBody))
-	if err != nil {
-		return
-	}
-	for k, v := range message.ReqHeader {
-		r.Header.Set(k, v)
-	}
-
-	reqBody, err := io.ReadAll(r.Body)
-	if err != nil {
-		return
-	}
-	r.Body = io.NopCloser(bytes.NewBuffer(reqBody))
-
-	begin := time.Now()
-	tr := HttpTransport()
-	response, err := tr.RoundTrip(r)
-	spend := uint16(time.Since(begin).Milliseconds())
-	if err != nil {
-		return
-	}
-
-	defer func() {
-		_ = response.Body.Close()
-	}()
-
-	var size int64
-	var respBody string
-	contentTypes := response.Header.Get("Content-Type")
-	bodyBytes, err := io.ReadAll(response.Body)
-	if err != nil {
-		return
-	}
-
-	size = int64(len(bodyBytes))
-	if !(strings.Contains(strings.ToLower(contentTypes), "image") || strings.Contains(strings.ToLower(contentTypes), "video")) {
-		if response.Header.Get("Content-Encoding") == "deflate" {
-			reader := flate.NewReader(bytes.NewReader(bodyBytes))
-			defer func() {
-				err = reader.Close()
-				if err != nil {
-					return
-				}
-			}()
-
-			bodyBytes, err = io.ReadAll(reader)
-			if err != nil {
-				return
-			}
-		}
-		if response.Header.Get("Content-Encoding") == "br" {
-			bodyBytes, err = io.ReadAll(brotli.NewReader(bytes.NewReader(bodyBytes)))
-			if err != nil {
-				return
-			}
-		}
-		if response.Header.Get("Content-Encoding") == "deflate" {
-			reader := flate.NewReader(bytes.NewReader(bodyBytes))
-			defer func() {
-				if reader != nil {
-					err = reader.Close()
-					if err != nil {
-						return
-					}
-				}
-			}()
-			bodyBytes, err = io.ReadAll(reader)
-			if err != nil {
-				return
-			}
-		}
-		if response.Header.Get("Content-Encoding") == "gzip" {
-			reader, err := gzip.NewReader(bytes.NewReader(bodyBytes))
-			defer func() {
-				if reader != nil {
-					err = reader.Close()
-					if err != nil {
-						return
-					}
-				}
-			}()
-			if err != nil {
-				return
-			}
-			bodyBytes, err = io.ReadAll(reader)
-			if err != nil {
-				return
-			}
-		}
-
-		respBody = string(bodyBytes)
-	}
-
-	go func(r *http.Request, response *http.Response) {
-		reqHeader := make(map[string]string)
-		for k := range r.Header {
-			reqHeader[k] = r.Header.Get(k)
-		}
-		respHeader := make(map[string]string)
-		for k := range response.Header {
-			respHeader[k] = response.Header.Get(k)
-		}
-
-		//reqTrailer := make(map[string]string)
-		//for k := range r.Trailer {
-		//	reqTrailer[k] = r.Trailer.Get(k)
-		//}
-		//respTrailer := make(map[string]string)
-		//for k := range response.Trailer {
-		//	respTrailer[k] = response.Trailer.Get(k)
-		//}
-
-		reqCookie := make(map[string]string)
-		for _, v := range r.Cookies() {
-			reqCookie[v.Name] = v.Raw
-		}
-		respCookie := make(map[string]string)
-		for _, v := range response.Cookies() {
-			respCookie[v.Name] = v.Raw
-		}
-
-		reqTls := make(map[string]string)
-		if r.TLS != nil {
-			reqTls["ServerName"] = r.TLS.ServerName
-			reqTls["NegotiatedProtocol"] = r.TLS.NegotiatedProtocol
-			reqTls["Version"] = fmt.Sprintf("%d", r.TLS.Version)
-			reqTls["Unique"] = string(r.TLS.TLSUnique)
-			reqTls["CipherSuite"] = cipherSuiteMap[r.TLS.CipherSuite]
-		}
-
-		respTls := make(map[string]string)
-		if response.TLS != nil {
-			respTls["ServerName"] = response.TLS.ServerName
-			respTls["NegotiatedProtocol"] = response.TLS.NegotiatedProtocol
-			version := "Unknown"
-			switch response.TLS.Version {
-			case tls.VersionTLS10:
-				version = "1.0"
-			case tls.VersionTLS11:
-				version = "1.1"
-			case tls.VersionTLS12:
-				version = "1.2"
-			case tls.VersionTLS13:
-				version = "1.3"
-			}
-			respTls["Version"] = version
-			respTls["Unique"] = base64.StdEncoding.EncodeToString(response.TLS.TLSUnique)
-			if r.TLS != nil {
-				if cipherSuite, ok := cipherSuiteMap[r.TLS.CipherSuite]; ok {
-					respTls["CipherSuite"] = cipherSuite
-				}
-			}
-		}
-
-		contentType := contentTypes
-		for _, v := range strings.Split(contentTypes, ";") {
-			v = strings.TrimSpace(v)
-			if v == "" {
-				continue
-			}
-			if strings.Contains(strings.ToLower(v), "charset=") {
-				continue
-			}
-			contentType = v
-			break
-		}
-
-		//p.logger.Info("Response", "StatusCode", response.StatusCode, r.Method, r.URL.String(), "contentType", contentType)
-
-		if p.messageChan != nil {
-			p.messageChan <- &Message{
-				Url:        r.URL.String(),
-				RemoteAddr: r.RemoteAddr,
-				Method:     r.Method,
-				Type:       contentType,
-				Time:       spend,
-				Size:       uint16(size),
-				Status:     uint16(response.StatusCode),
-				ReqHeader:  reqHeader,
-				ReqCookie:  reqCookie,
-				ReqBody:    string(reqBody),
-				RespHeader: respHeader,
-				RespCookie: respCookie,
-				RespBody:   respBody,
-				RespTls:    respTls,
-			}
-		}
-	}(r, response)
-}
-
-func copyHeader(dst, src http.Header) {
-	for k, vv := range src {
-		for _, v := range vv {
-			dst.Add(k, v)
-		}
-	}
 }
 
 func NewProxy(addr string, caCert, caKey []byte) (p *Proxy, err error) {
@@ -652,4 +252,74 @@ func (p *Proxy) Stop() {
 	p.httpSrv.Close()
 
 	p.wg.Wait()
+}
+
+func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	host := r.Host
+	if strings.Contains(r.Host, ":") {
+		host = host[:strings.Index(host, ":")]
+	}
+
+	for _, v := range p.exclude {
+		if matched, _ := filepath.Match(v, host); matched {
+			p.forward(w, r)
+			return
+		}
+	}
+
+	include := true
+	for _, v := range p.include {
+		include = false
+		if matched, _ := filepath.Match(v, host); matched {
+			include = true
+			break
+		}
+	}
+
+	if !include {
+		p.forward(w, r)
+		return
+	}
+
+	if isHttpsRequest(r) {
+		p.handleHttps(w, r)
+		return
+	}
+	// 检查是否为 WebSocket 请求
+	if isWebSocketRequest(r) {
+		p.handleWebSocket(w, r)
+		return
+	}
+
+	if isSSERequest(r) {
+		p.handleSSE(w, r)
+		return
+	}
+
+	if r.URL.Host == "" {
+		r.URL.Host = r.Host
+	}
+
+	if r.URL.Scheme == "" {
+		r.URL.Scheme = "https"
+	}
+
+	for _, v := range p.replace {
+		if ok, _ := filepath.Match(v[0], r.URL.String()); !ok {
+			continue
+		}
+
+		switch v[1] {
+		case "http://", "https://":
+			if r, err := http.NewRequest(http.MethodGet, v[2], nil); err == nil {
+				p.doReplace1(w, r)
+			}
+		case "file://":
+			if data, err := os.ReadFile("/" + v[2]); err == nil {
+				p.doReplace2(w, data)
+			}
+		}
+		return
+	}
+	p.handleHttp(w, r)
 }
