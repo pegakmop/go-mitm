@@ -19,11 +19,23 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 	reqBody := new(bytes.Buffer)
 
 	r.Body = io.NopCloser(io.TeeReader(r.Body, reqBody))
+
 	// 创建到目标服务器的请求
 	req, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	reqHeader := make(map[string]string)
+
+	for k := range r.Header {
+		reqHeader[k] = r.Header.Get(k)
+	}
+
+	reqCookie := make(map[string]string)
+	for _, v := range r.Cookies() {
+		reqCookie[v.Name] = v.Value
 	}
 
 	// 设置请求头
@@ -48,8 +60,9 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 发送请求到目标服务器
-	client := &http.Client{Transport: HttpTransport()}
-	resp, err := client.Do(req)
+	// client := &http.Client{Transport: HttpTransport()}
+	// resp, err := client.Do(req)
+	resp, err := HttpTransport().RoundTrip(req)
 	if err != nil {
 		_, _ = w.Write([]byte("event: error\ndata: " + err.Error() + "\n\n"))
 		flusher.Flush()
@@ -57,23 +70,45 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	var msg *Message
+	respHeader := make(map[string]string)
+	for k := range resp.Header {
+		respHeader[k] = resp.Header.Get(k)
+	}
+
+	respCookie := make(map[string]string)
+	for _, v := range resp.Cookies() {
+		respCookie[v.Name] = v.Value
+	}
+
+	var msg *SSEMessage
 	// 记录SSE连接信息
 	if p.messageChan != nil {
-		msg = &Message{
-			Url:          r.URL.String(),
-			RemoteAddr:   r.RemoteAddr,
-			Method:       r.Method,
-			ReqBody:      reqBody.String(),
-			Type:         "text/event-stream",
-			Status:       uint16(resp.StatusCode),
-			ReqHeader:    map[string]string{"Accept": r.Header.Get("Accept")},
-			RespBodyChan: make(chan []byte, 10240),
+		msg = &SSEMessage{
+			Url:        r.URL.String(),
+			RemoteAddr: r.RemoteAddr,
+			Method:     r.Method,
+			Type:       getContentType(resp.Header),
+			Status:     uint16(resp.StatusCode),
+			ReqHeader:  reqHeader,
+			ReqCookie:  reqCookie,
+			ReqBody:    reqBody.String(),
+			ReqTls:     getReqTLSInfo(r.TLS),
+			RespHeader: respHeader,
+			RespCookie: respCookie,
+			RespTls:    getRespTLSInfo(resp.TLS, r.TLS),
+			RespBody:   make(chan []byte, 10240),
 		}
+		defer close(msg.RespBody)
 
-		defer close(msg.RespBodyChan)
+		p.messageChan <- &Message{
+			typ:  MessageTypeSSE,
+			data: msg,
+		}
+	}
 
-		p.messageChan <- msg
+	var ch chan []byte
+	if msg != nil {
+		ch = msg.RespBody
 	}
 
 	// 从目标服务器读取SSE事件并按行转发到客户端
@@ -91,8 +126,8 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 		}
 		flusher.Flush()
 
-		if msg != nil {
-			msg.RespBodyChan <- data
+		if ch != nil {
+			ch <- data
 		}
 	}
 

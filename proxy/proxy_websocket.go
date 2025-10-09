@@ -25,6 +25,17 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	reqHeader := make(map[string]string)
+
+	for k := range r.Header {
+		reqHeader[k] = r.Header.Get(k)
+	}
+
+	reqCookie := make(map[string]string)
+	for _, v := range r.Cookies() {
+		reqCookie[v.Name] = v.Value
+	}
+
 	// 创建到目标服务器的 WebSocket 连接
 	targetURL := r.URL
 
@@ -65,6 +76,16 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer targetConn.Close()
 
+	respHeader := make(map[string]string)
+	for k := range resp.Header {
+		respHeader[k] = resp.Header.Get(k)
+	}
+
+	respCookie := make(map[string]string)
+	for _, v := range resp.Cookies() {
+		respCookie[v.Name] = v.Value
+	}
+
 	upgradeHeader := http.Header{}
 	upgradeHeader.Add("Sec-WebSocket-Protocol", r.Header.Get("Sec-WebSocket-Protocol"))
 
@@ -81,41 +102,57 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer clientConn.Close()
 
 	// 记录 WebSocket 连接信息
-	var msg *Message
+	var msg *WebSocketMessage
 	if p.messageChan != nil {
-		msg = &Message{
+		msg = &WebSocketMessage{
 			Url:        r.URL.String(),
 			RemoteAddr: r.RemoteAddr,
 			Method:     r.Method,
-			Type:       "websocket",
-			Status:     101,
-			ReqHeader: map[string]string{
-				"Upgrade":    r.Header.Get("Upgrade"),
-				"Connection": r.Header.Get("Connection"),
-			},
-			RespBodyChan: make(chan []byte, 10240),
+			Type:       getContentType(resp.Header),
+			Status:     uint16(resp.StatusCode),
+			ReqHeader:  reqHeader,
+			ReqCookie:  reqCookie,
+			ReqBody:    make(chan []byte, 10240),
+			ReqTls:     getReqTLSInfo(r.TLS),
+			RespHeader: respHeader,
+			RespCookie: respCookie,
+			RespTls:    getRespTLSInfo(resp.TLS, r.TLS),
+			RespBody:   make(chan []byte, 10240),
 		}
-		defer close(msg.RespBodyChan)
 
-		p.messageChan <- msg
+		defer func() {
+			close(msg.ReqBody)
+			close(msg.RespBody)
+		}()
+
+		p.messageChan <- &Message{
+			typ:  MessageTypeWebSocket,
+			data: msg,
+		}
 	}
 
 	var g sync.WaitGroup
-	g.Add(2)
-	go func() {
-		defer g.Done()
-		p.proxyWebSocket(clientConn, targetConn, msg)
-	}()
 
-	go func() {
-		defer g.Done()
-		p.proxyWebSocket(targetConn, clientConn, nil)
-	}()
+	g.Go(func() {
+		var ch chan []byte
+		if msg != nil {
+			ch = msg.RespBody
+		}
+		p.proxyWebSocket(clientConn, targetConn, ch)
+	})
+	g.Go(func() {
+		var ch chan []byte
+		if msg != nil {
+			ch = msg.ReqBody
+		}
+		p.proxyWebSocket(targetConn, clientConn, ch)
+	})
+
 	g.Wait()
 }
 
 // 新增：转发 WebSocket 消息
-func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn, msg *Message) error {
+func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn, ch chan []byte) error {
 
 	for {
 		messageType, message, err := src.ReadMessage()
@@ -126,16 +163,16 @@ func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn, msg *Message) error {
 			return err
 		}
 
+		if ch != nil {
+			ch <- message
+		}
+
 		err = dst.WriteMessage(messageType, message)
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseGoingAway) {
 				return nil
 			}
 			return err
-		}
-
-		if msg != nil {
-			msg.RespBodyChan <- message
 		}
 	}
 }

@@ -12,7 +12,8 @@ import (
 	"github.com/andybalholm/brotli"
 )
 
-func (p *Proxy) Replay(message Message) {
+func (p *Proxy) Replay(message HTTPMessage) {
+
 	r, err := http.NewRequest(message.Method, message.Url, strings.NewReader(message.ReqBody))
 	if err != nil {
 		return
@@ -150,23 +151,28 @@ func (p *Proxy) Replay(message Message) {
 		//p.logger.Info("Response", "StatusCode", response.StatusCode, r.Method, r.URL.String(), "contentType", contentType)
 
 		if p.messageChan != nil {
+
 			p.messageChan <- &Message{
-				Url:        r.URL.String(),
-				RemoteAddr: r.RemoteAddr,
-				Method:     r.Method,
-				Type:       contentType,
-				Time:       spend,
-				Size:       uint16(size),
-				Status:     uint16(response.StatusCode),
-				ReqHeader:  reqHeader,
-				ReqCookie:  reqCookie,
-				ReqBody:    string(reqBody),
-				ReqTls:     getReqTLSInfo(r.TLS),
-				RespHeader: respHeader,
-				RespCookie: respCookie,
-				RespBody:   respBody,
-				RespTls:    getRespTLSInfo(response.TLS, r.TLS),
+				typ: MessageTypeHTTP,
+				data: &HTTPMessage{
+					Url:        r.URL.String(),
+					RemoteAddr: r.RemoteAddr,
+					Method:     r.Method,
+					Type:       contentType,
+					Time:       spend,
+					Size:       uint16(size),
+					Status:     uint16(response.StatusCode),
+					ReqHeader:  reqHeader,
+					ReqCookie:  reqCookie,
+					ReqBody:    string(reqBody),
+					ReqTls:     getReqTLSInfo(r.TLS),
+					RespHeader: respHeader,
+					RespCookie: respCookie,
+					RespBody:   respBody,
+					RespTls:    getRespTLSInfo(response.TLS, r.TLS),
+				},
 			}
+
 		}
 	}(r, response)
 }

@@ -61,7 +61,6 @@ func (a *Api) info(w http.ResponseWriter, _ *http.Request) {
 		Replace:    a.server.Replace(),
 	}
 	_, _ = w.Write([]byte(info.String()))
-	return
 }
 func (a *Api) action(_ http.ResponseWriter, r *http.Request) {
 	record := r.URL.Query().Get("record")
@@ -71,7 +70,7 @@ func (a *Api) action(_ http.ResponseWriter, r *http.Request) {
 	}
 	replay := r.URL.Query().Get("replay")
 	if replay != "" {
-		var message proxy.Message
+		var message proxy.HTTPMessage
 		_ = json.Unmarshal([]byte(replay), &message)
 		a.server.Replay(message)
 		return
@@ -132,15 +131,18 @@ out:
 		}
 
 		select {
-		case message := <-a.messageChan:
-			atomic.AddUint64(&a.id, 1)
-			message.Id = atomic.LoadUint64(&a.id)
-			_, err := fmt.Fprintf(w, "data: %s\n\n", message.String())
-			if err != nil {
-				fmt.Println(err)
-				break out
+		case msg := <-a.messageChan:
+			if msg.Type() == proxy.MessageTypeHTTP {
+				message := msg.HTTP()
+				atomic.AddUint64(&a.id, 1)
+				message.Id = atomic.LoadUint64(&a.id)
+				_, err := fmt.Fprintf(w, "data: %s\n\n", message.String())
+				if err != nil {
+					fmt.Println(err)
+					break out
+				}
+				flusher.Flush()
 			}
-			flusher.Flush()
 		default:
 			if client != atomic.LoadUint64(&a.client) {
 				break out
@@ -149,5 +151,4 @@ out:
 	}
 
 	_, _ = fmt.Fprintf(w, "event: close\ndata: close\n\n")
-	return
 }

@@ -134,21 +134,24 @@ func (p *Proxy) handleHttp(rw http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		p.messageChan <- &Message{
-			Url:        r.URL.String(),
-			RemoteAddr: r.RemoteAddr,
-			Method:     r.Method,
-			Type:       getContentType(resp.Header),
-			Time:       spend,
-			Size:       uint16(size),
-			Status:     uint16(resp.StatusCode),
-			ReqHeader:  reqHeader,
-			ReqCookie:  reqCookie,
-			ReqBody:    reqBody.String(),
-			ReqTls:     getReqTLSInfo(r.TLS),
-			RespHeader: respHeader,
-			RespCookie: respCookie,
-			RespBody:   respBody.String(),
-			RespTls:    getRespTLSInfo(resp.TLS, r.TLS),
+			typ: MessageTypeHTTP,
+			data: &HTTPMessage{
+				Url:        r.URL.String(),
+				RemoteAddr: r.RemoteAddr,
+				Method:     r.Method,
+				Type:       getContentType(resp.Header),
+				Time:       spend,
+				Size:       uint16(size),
+				Status:     uint16(resp.StatusCode),
+				ReqHeader:  reqHeader,
+				ReqCookie:  reqCookie,
+				ReqBody:    reqBody.String(),
+				ReqTls:     getReqTLSInfo(r.TLS),
+				RespHeader: respHeader,
+				RespCookie: respCookie,
+				RespBody:   respBody.String(),
+				RespTls:    getRespTLSInfo(resp.TLS, r.TLS),
+			},
 		}
 		return nil
 	}
