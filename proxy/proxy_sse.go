@@ -96,7 +96,7 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 			RespHeader: respHeader,
 			RespCookie: respCookie,
 			RespTls:    getRespTLSInfo(resp.TLS, r.TLS),
-			RespBody:   make(chan []byte, 10240),
+			RespBody:   make(chan []byte, 1024),
 		}
 		defer close(msg.RespBody)
 

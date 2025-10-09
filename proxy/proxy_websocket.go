@@ -28,7 +28,15 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	reqHeader := make(map[string]string)
 
 	for k := range r.Header {
-		reqHeader[k] = r.Header.Get(k)
+		switch k {
+		case "Upgrade":
+		case "Connection":
+		case "Sec-Websocket-Key":
+		case "Sec-Websocket-Version":
+		case "Sec-Websocket-Extensions":
+		default:
+			reqHeader[k] = r.Header.Get(k)
+		}
 	}
 
 	reqCookie := make(map[string]string)
@@ -102,9 +110,9 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer clientConn.Close()
 
 	// 记录 WebSocket 连接信息
-	var msg *WebSocketMessage
+	var msg *WebsocketMessage
 	if p.messageChan != nil {
-		msg = &WebSocketMessage{
+		msg = &WebsocketMessage{
 			Url:        r.URL.String(),
 			RemoteAddr: r.RemoteAddr,
 			Method:     r.Method,
@@ -112,12 +120,12 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			Status:     uint16(resp.StatusCode),
 			ReqHeader:  reqHeader,
 			ReqCookie:  reqCookie,
-			ReqBody:    make(chan []byte, 10240),
+			ReqBody:    make(chan []byte, 1024),
 			ReqTls:     getReqTLSInfo(r.TLS),
 			RespHeader: respHeader,
 			RespCookie: respCookie,
 			RespTls:    getRespTLSInfo(resp.TLS, r.TLS),
-			RespBody:   make(chan []byte, 10240),
+			RespBody:   make(chan []byte, 1024),
 		}
 
 		defer func() {
@@ -126,7 +134,7 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		p.messageChan <- &Message{
-			typ:  MessageTypeWebSocket,
+			typ:  MessageTypeWebsocket,
 			data: msg,
 		}
 	}

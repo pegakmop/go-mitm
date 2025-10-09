@@ -9,7 +9,7 @@ type MessageType string
 const (
 	MessageTypeHTTP      MessageType = "http"
 	MessageTypeSSE       MessageType = "sse"
-	MessageTypeWebSocket MessageType = "websocket"
+	MessageTypeWebsocket MessageType = "websocket"
 )
 
 type Message struct {
@@ -25,8 +25,8 @@ func (m *Message) HTTP() *HTTPMessage {
 	return m.data.(*HTTPMessage)
 }
 
-func (m *Message) WebSocket() *WebSocketMessage {
-	return m.data.(*WebSocketMessage)
+func (m *Message) WebSocket() *WebsocketMessage {
+	return m.data.(*WebsocketMessage)
 }
 
 func (m *Message) SSE() *SSEMessage {
@@ -57,7 +57,7 @@ func (m *HTTPMessage) String() string {
 	return message
 }
 
-type WebSocketMessage struct {
+type WebsocketMessage struct {
 	Id         uint64            `json:"id,omitempty"`
 	Method     string            `json:"method,omitempty"`
 	Type       string            `json:"type,omitempty"`
@@ -76,7 +76,7 @@ type WebSocketMessage struct {
 	RespBody   chan []byte       `json:"resp_body,omitempty"`
 }
 
-func (m *WebSocketMessage) String() string {
+func (m *WebsocketMessage) String() string {
 	message, _ := jsoniter.MarshalToString(m)
 	return message
 }
