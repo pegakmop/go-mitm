@@ -26,7 +26,9 @@ func (p *Proxy) handleHttps(w http.ResponseWriter, r *http.Request) {
 	hijack, _, err := hijacker.Hijack()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
 	}
+
 	defer func() {
 		_ = hijack.Close()
 	}()

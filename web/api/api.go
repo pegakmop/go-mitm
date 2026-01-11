@@ -51,8 +51,8 @@ func (a *Api) Handler() http.Handler {
 }
 func (a *Api) info(w http.ResponseWriter, _ *http.Request) {
 	info := Info{
-		Record:     a.record,
-		Proxy:      a.server.Proxy(),
+		Record: a.record,
+		// Proxy:      a.server.Proxy(),
 		Exclude:    a.server.Exclude(),
 		Include:    a.server.Include(),
 		LanIp:      a.lanIp,
@@ -96,10 +96,10 @@ func (a *Api) action(_ http.ResponseWriter, r *http.Request) {
 	p := r.URL.Query().Get("proxy")
 	if p != "" {
 		if p == "-" {
-			a.server.ClearProxy()
+			proxy.ClearProxy()
 			return
 		}
-		a.server.SetProxy(p)
+		proxy.SetProxy(p)
 		return
 	}
 	replace := r.URL.Query().Get("replace")

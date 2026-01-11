@@ -35,7 +35,7 @@ func main() {
 	p.SetMessageChan(messageChan)
 	p.SetInclude(*includePtr)
 	p.SetExclude(*excludePtr)
-	p.SetProxy(*proxyPtr)
+	proxy.SetProxy(*proxyPtr)
 	p.SetSocks5(*socks5Ptr)
 
 	p.Start()

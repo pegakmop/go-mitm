@@ -20,6 +20,7 @@ import (
 var (
 	proxyFunc func(*http.Request) (*url.URL, error)
 	hookFunc  func(*url.URL, []byte) []byte
+	errorFunc func(format string, a ...any)
 
 	netDialer Dialer = NewNetDialer(&net.Dialer{
 		Timeout:   30 * time.Second,
@@ -33,7 +34,6 @@ type Proxy struct {
 	rootKey      *rsa.PrivateKey
 	privateKey   *rsa.PrivateKey
 	listener     *Listener
-	proxy        string
 	socks5       string
 	disableGZIP  bool
 	httpSrv      *http.Server
@@ -117,22 +117,16 @@ func (p *Proxy) ClearReplace() [][]string {
 	return p.replace
 }
 
-func (p *Proxy) Proxy() string {
-	return p.proxy
-}
-
-func (p *Proxy) SetProxy(uri string) {
+func SetProxy(uri string) {
 	if uri == "" {
 		return
 	}
-	p.proxy = uri
 	proxyFunc = func(_ *http.Request) (*url.URL, error) {
 		return url.Parse(uri)
 	}
 }
 
-func (p *Proxy) ClearProxy() {
-	p.proxy = ""
+func ClearProxy() {
 	proxyFunc = nil
 }
 
@@ -158,29 +152,37 @@ func (p *Proxy) ClearSocks5() {
 	})
 }
 
-func (p *Proxy) ClientHello() *UtlsConfig {
+func ClientHello() *UtlsConfig {
 	return clientHelloConfig
 }
 
-func (p *Proxy) SetClientHello(config *UtlsConfig) {
+func SetClientHello(config *UtlsConfig) {
 	clientHelloConfig = config
 }
 
-func (p *Proxy) ClearClientHello() {
+func ClearClientHello() {
 	clientHelloConfig = nil
 }
 
 // hookFunc   func(*url.URL, []byte) []byte
-func (p *Proxy) SetHook(hook func(*url.URL, []byte) []byte) {
+func SetHook(hook func(*url.URL, []byte) []byte) {
 	hookFunc = hook
 }
 
-func (p *Proxy) ClearHook() {
+func ClearHook() {
 	hookFunc = nil
 }
 
 func (p *Proxy) DisableGZIP() {
 	p.disableGZIP = true
+}
+
+func SetError(errFn func(format string, a ...any)) {
+	errorFunc = errFn
+}
+
+func ClearError() {
+	errorFunc = nil
 }
 
 func NewProxy(addr string, caCert, caKey []byte) (p *Proxy, err error) {

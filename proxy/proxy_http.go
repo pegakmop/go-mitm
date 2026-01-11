@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httputil"
@@ -84,7 +83,7 @@ func (p *Proxy) handleHttp(rw http.ResponseWriter, r *http.Request) {
 	reverseProxy.Transport = HttpTransport()
 
 	reverseProxy.ErrorHandler = func(resp http.ResponseWriter, req *http.Request, err error) {
-		fmt.Printf("ErrorHandler url(%v) error(%v)\n", req.URL.String(), err)
+		errFunc("ErrorHandler url(%v) error(%v)\n", req.URL.String(), err)
 	}
 
 	reverseProxy.ModifyResponse = func(resp *http.Response) error {
@@ -107,7 +106,7 @@ func (p *Proxy) handleHttp(rw http.ResponseWriter, r *http.Request) {
 
 		responseData, err := io.ReadAll(resp.Body)
 		if err != nil {
-			fmt.Printf("io.ReadAll(resp.Body) error(%v)\n", err)
+			errFunc("io.ReadAll(resp.Body) error(%v)\n", err)
 			return err
 		}
 

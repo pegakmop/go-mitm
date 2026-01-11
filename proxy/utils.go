@@ -8,6 +8,13 @@ import (
 	"strings"
 )
 
+func errFunc(format string, a ...any) {
+	if errorFunc == nil {
+		return
+	}
+	errorFunc(format, a...)
+}
+
 func LanIp() (lanIp string) {
 	interfaces, err := net.Interfaces()
 	if err == nil {
